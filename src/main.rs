@@ -50,11 +50,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     const BAUD_RATE: u32 = 500000;
 
-    let mut _port = serialport::new(&cli.serial_port, BAUD_RATE)
+    let mut port = serialport::new(&cli.serial_port, BAUD_RATE)
         .timeout(Duration::from_secs(2))
         .open()?;
 
     set_latency_linux(&cli.serial_port,2)?;
+
+    port.write_request_to_send(true)?;
+
+    port.write_data_terminal_ready(true)?;
 
     println!("Opened port: {} @ {} baud", cli.serial_port, BAUD_RATE);
 
