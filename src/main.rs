@@ -19,6 +19,9 @@
 
 use clap::{Parser};
 use std::time::Duration;
+use std::path::{PathBuf};
+use std::fs::File;
+use std::io::Write;
 
 #[derive(Parser)]
 #[clap(author, version, about)]
@@ -28,15 +31,30 @@ struct Cli {
     serial_port: String,
 }
 
+fn set_latency_linux(device: &String, latency: u8) -> std::io::Result<()> {
+    let location = PathBuf::from(device);
+    let path = format!(
+        "/sys/bus/usb-serial/devices/{}/latency_timer",
+        location.file_name().unwrap().to_os_string().into_string().unwrap()
+
+    );
+
+    let mut file = File::create(path)?;
+    write!(file, "{}", latency)?;
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let cli = Cli::parse();
 
-    const BAUD_RATE: u32 = 9600;
+    const BAUD_RATE: u32 = 500000;
 
     let mut _port = serialport::new(&cli.serial_port, BAUD_RATE)
         .timeout(Duration::from_secs(2))
         .open()?;
+
+    set_latency_linux(&cli.serial_port,2)?;
 
     println!("Opened port: {} @ {} baud", cli.serial_port, BAUD_RATE);
 
