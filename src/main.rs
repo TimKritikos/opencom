@@ -151,16 +151,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     loop{
-        let command = vec![0x07, 0x00, 0x01, 0x82, 0x11, 0xf1, 0x21, 0x01, 0xa6, 0x54];
-        let received = send_command(&mut *port, command).unwrap();
-        let throttle_position_sensor = received[36];
+        let get_engine_data_command = vec![0x07, 0x00, 0x01, 0x82, 0x11, 0xf1, 0x21, 0x01, 0xa6, 0x54];
 
-        println!("Throttle position sensor: {}%",((throttle_position_sensor as u16 *100)/255));
-        //print!("Raw bytes: ");
-        //for byte in received {
-        //    print!("{:02X} ", byte);
-        //}
-        //println!("\n");
+        let received = send_command(&mut *port, get_engine_data_command).unwrap();
+
+        if  received.len() == 64 {
+            let battery_voltage =          received[22];
+            let throttle_position_sensor = received[36];
+
+            println!("Throttle position sensor: {}%",((throttle_position_sensor as u16 *100)/255));
+            println!("Battery voltage: {}.{}V", battery_voltage / 10, battery_voltage % 10);
+            //print!("Raw bytes: ({})",received.len());
+        }else{
+            print!("Invalid response!");
+        }
+
+        for byte in received {
+            print!("{:02X} ", byte);
+        }
+        println!("\n");
 
 
     }
