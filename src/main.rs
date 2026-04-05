@@ -214,7 +214,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let mut comma=false;
                     for byte in &get_engine_data_command {
                         write!(file, "{}{}",if comma{","}else{""}, byte)?;
-                        if comma==false {
+                        if !comma {
                             comma=true;
                         }
                     }
@@ -222,11 +222,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     comma=false;
                     for byte in &received {
                         write!(file, "{}{}",if comma{","}else{""}, byte)?;
-                        if comma==false {
+                        if !comma {
                             comma=true;
                         }
                     }
-                    if list_comma==false {
+                    if !list_comma {
                         list_comma=true;
                     }
                     writeln!(file,"]}}")?;
@@ -256,7 +256,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if cli.live_communication_stats {
                         error_stat_window.push_back(stat_timestamp);
                     }
-                    consecutive_errors=consecutive_errors+1;
+                    consecutive_errors += 1;
                     false
                 };
 
