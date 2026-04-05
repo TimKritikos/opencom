@@ -27,6 +27,14 @@ use serialport::ClearBuffer;
 use serialport::SerialPort;
 use std::time::Instant;
 use std::collections::VecDeque;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
+use signal_hook::consts::SIGINT;
+use signal_hook::flag;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 #[derive(Parser)]
 #[clap(author, version, about)]
@@ -34,6 +42,10 @@ struct Cli {
     /// Serial Port name
     #[arg(short='s')]
     serial_port: String,
+
+    /// Archive JSON file. This will create a json file with all the bytes of the commands sent and responses received with timestamps to parse later
+    #[arg(short='a')]
+    archive_json_file: Option<PathBuf>,
 }
 
 fn set_latency_linux(device: &String, latency: u8) -> std::io::Result<()> {
@@ -49,9 +61,9 @@ fn set_latency_linux(device: &String, latency: u8) -> std::io::Result<()> {
     Ok(())
 }
 
-fn send_command(port:&mut dyn SerialPort, command:Vec<u8>, size:usize) -> std::io::Result<Vec<u8>>{
+fn send_command(port:&mut dyn SerialPort, command:&Vec<u8>, size:usize) -> std::io::Result<Vec<u8>>{
     for byte in command {
-        port.write_all(&[byte])?;
+        port.write_all(&[*byte])?;
         port.flush()?;
     }
 
@@ -98,7 +110,12 @@ fn initialise_opcom(port:&mut dyn SerialPort) -> std::io::Result<()>{
         }
         print!(" ]");
 
-        let received = send_command(&mut *port, command, 1024).unwrap();
+        let received = match send_command(&mut *port, &command, 1024){
+            Ok(a) => a,
+            Err(e)  => {
+                return Err(e);
+            }
+        };
 
         println!(" OK");
 
@@ -148,72 +165,121 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let error_stat_window_size = Duration::from_secs(20);
     let mut consecutive_errors = 0;
 
+    let mut archive_json_file:Option<File> = if let Some(archive_json_filename) = cli.archive_json_file {
+        Some(File::create(archive_json_filename)?)
+    }else{
+        None
+    };
+
+    if let Some(ref mut file) = archive_json_file {
+        writeln!(file,"{{\"data_type\": \"opencom_log_file\",\"data_structure_version\":\"{}\",\"data\":[",env!("CARGO_PKG_VERSION"))?;
+    }
+
+    let mut list_comma=false;
+    let terminate_flag = Arc::new(AtomicBool::new(false));
+    flag::register(SIGINT, Arc::clone(&terminate_flag))?;
     loop{
         let get_engine_data_command = vec![0x07, 0x00, 0x01, 0x82, 0x11, 0xf1, 0x21, 0x01, 0xa6, 0x54];
 
-        let received = send_command(&mut *port, get_engine_data_command, 64).unwrap();
+        match send_command(&mut *port, &get_engine_data_command, 64){
+            Ok(received) => {
+                let stat_timestamp = Instant::now();
+                let clock_timestamp = SystemTime::now();
 
-        let now = Instant::now();
+                if let Some(ref mut file) = archive_json_file {
+                    let data_timestamp=clock_timestamp.duration_since(UNIX_EPOCH)?;
+                    write!(file,"{}{{\"timestamp\":{}.{},\"command\":[",if list_comma{","}else{""},data_timestamp.as_secs(),data_timestamp.subsec_nanos())?;
+                    let mut comma=false;
+                    for byte in &get_engine_data_command {
+                        write!(file, "{}{}",if comma{","}else{""}, byte)?;
+                        if comma==false {
+                            comma=true;
+                        }
+                    }
+                    write!(file,"],\"response\":[",)?;
+                    comma=false;
+                    for byte in &received {
+                        write!(file, "{}{}",if comma{","}else{""}, byte)?;
+                        if comma==false {
+                            comma=true;
+                        }
+                    }
+                    if list_comma==false {
+                        list_comma=true;
+                    }
+                    write!(file,"]}}\n")?;
+                }
 
-        if  received.len() == 64 {
-            let battery_voltage =          received[22];
-            let throttle_position_sensor = received[36];
-            let checksum1 =                received[62];
-            let _unkown_checksum2 =        received[63];
+                if  received.len() == 64 {
+                    let battery_voltage =          received[22];
+                    let throttle_position_sensor = received[36];
+                    let checksum1 =                received[62];
+                    let _unkown_checksum2 =        received[63];
 
-            // Check checksum
-            let mut b1:u8 = 0;
-            for byte in &received[9..62]{
-                b1=b1.wrapping_add(*byte);
+                    // Check checksum
+                    let mut b1:u8 = 0;
+                    for byte in &received[9..62]{
+                        b1=b1.wrapping_add(*byte);
+                    }
+
+                    if  checksum1 != b1 {
+                        println!("Invalid checksum!\n");
+                        thread::sleep(Duration::from_millis(400));
+                    }else{
+                        println!("Throttle position sensor: {}%",((throttle_position_sensor as u16 *100)/255));
+                        println!("Battery voltage: {}.{}V", battery_voltage / 10, battery_voltage % 10);
+                    }
+                    consecutive_errors=0;
+                }else{
+                    print!("Invalid response!");
+                    error_stat_window.push_back(stat_timestamp);
+                    consecutive_errors=consecutive_errors+1;
+                }
+
+                if consecutive_errors > 5 {
+                    initialise_opcom(&mut *port)?;
+                    consecutive_errors = 0;
+                }
+
+                request_stat_window.push_back(stat_timestamp);
+
+                // Calculate Stats
+                while let Some(&front) = request_stat_window.front() {
+                    if stat_timestamp.duration_since(front) > request_stat_window_size {
+                        request_stat_window.pop_front();
+                    } else {
+                        break;
+                    }
+                }
+                while let Some(&front) = error_stat_window.front() {
+                    if stat_timestamp.duration_since(front) > error_stat_window_size {
+                        error_stat_window.pop_front();
+                    } else {
+                        break;
+                    }
+                }
+
+                println!("Sample rate: {:.1}Hz", request_stat_window.len() as f64 / request_stat_window_size.as_secs_f64());
+                println!("Error rate: {:.2}Hz", error_stat_window.len() as f64 / error_stat_window_size.as_secs_f64());
+
+                //print!("Raw bytes: ({})",received.len());
+                //for byte in received {
+                //    print!("{:02X} ", byte);
+                //}
+                //println!("\n");
+            },
+            Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => {
+                println!("Error: {:?}",e);
             }
-
-            if  checksum1 != b1 {
-                println!("Invalid checksum!\n");
-                thread::sleep(Duration::from_millis(400));
-            }else{
-                println!("Throttle position sensor: {}%",((throttle_position_sensor as u16 *100)/255));
-                println!("Battery voltage: {}.{}V", battery_voltage / 10, battery_voltage % 10);
-            }
-            consecutive_errors=0;
-        }else{
-            print!("Invalid response!");
-            error_stat_window.push_back(now);
-            consecutive_errors=consecutive_errors+1;
         }
 
-        if consecutive_errors > 5 {
-            initialise_opcom(&mut *port)?;
-            consecutive_errors = 0;
-        }
-
-        request_stat_window.push_back(now);
-
-        // Calculate Stats
-        while let Some(&front) = request_stat_window.front() {
-            if now.duration_since(front) > request_stat_window_size {
-                request_stat_window.pop_front();
-            } else {
-                break;
+        if terminate_flag.load(Ordering::Relaxed) {
+            if let Some(ref mut file) = archive_json_file {
+                write!(file,"]}}\n")?;
             }
+            break;
         }
-        while let Some(&front) = error_stat_window.front() {
-            if now.duration_since(front) > error_stat_window_size {
-                error_stat_window.pop_front();
-            } else {
-                break;
-            }
-        }
-
-        println!("Sample rate: {:.1}Hz", request_stat_window.len() as f64 / request_stat_window_size.as_secs_f64());
-        println!("Error rate: {:.2}Hz", error_stat_window.len() as f64 / error_stat_window_size.as_secs_f64());
-
-        //print!("Raw bytes: ({})",received.len());
-        //for byte in received {
-        //    print!("{:02X} ", byte);
-        //}
-        //println!("\n");
-
-
     }
-
+    Ok(())
 }
