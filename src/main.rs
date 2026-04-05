@@ -25,6 +25,8 @@ use std::io::Write;
 use std::thread;
 use serialport::ClearBuffer;
 use serialport::SerialPort;
+use std::time::Instant;
+use std::collections::VecDeque;
 
 #[derive(Parser)]
 #[clap(author, version, about)]
@@ -147,10 +149,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("\n");
     }
 
+    let mut request_stat_window = VecDeque::new();
+    let mut error_stat_window = VecDeque::new();
+    let request_stat_window_size = Duration::from_secs(5);
+    let error_stat_window_size = Duration::from_secs(20);
+
     loop{
         let get_engine_data_command = vec![0x07, 0x00, 0x01, 0x82, 0x11, 0xf1, 0x21, 0x01, 0xa6, 0x54];
 
         let received = send_command(&mut *port, get_engine_data_command).unwrap();
+
+        let now = Instant::now();
 
         if  received.len() == 64 {
             let battery_voltage =          received[22];
@@ -172,13 +181,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }else{
             print!("Invalid response!");
+            error_stat_window.push_back(now);
         }
 
-        //print!("Raw bytes: ({})",received.len());
-        for byte in received {
-            print!("{:02X} ", byte);
+        request_stat_window.push_back(now);
+
+        // Calculate Stats
+        while let Some(&front) = request_stat_window.front() {
+            if now.duration_since(front) > request_stat_window_size {
+                request_stat_window.pop_front();
+            } else {
+                break;
+            }
         }
-        println!("\n");
+        while let Some(&front) = error_stat_window.front() {
+            if now.duration_since(front) > error_stat_window_size {
+                error_stat_window.pop_front();
+            } else {
+                break;
+            }
+        }
+
+        println!("Sample rate: {:.1}Hz", request_stat_window.len() as f64 / request_stat_window_size.as_secs_f64());
+        println!("Error rate: {:.2}Hz", error_stat_window.len() as f64 / error_stat_window_size.as_secs_f64());
+
+        //print!("Raw bytes: ({})",received.len());
+        //for byte in received {
+        //    print!("{:02X} ", byte);
+        //}
+        //println!("\n");
 
 
     }
