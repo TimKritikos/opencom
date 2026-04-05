@@ -158,14 +158,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if  received.len() == 64 {
             let battery_voltage =          received[22];
             let throttle_position_sensor = received[36];
+            let checksum1 =                received[62];
+            let unkown_checksum2 =         received[63];
 
-            println!("Throttle position sensor: {}%",((throttle_position_sensor as u16 *100)/255));
-            println!("Battery voltage: {}.{}V", battery_voltage / 10, battery_voltage % 10);
-            //print!("Raw bytes: ({})",received.len());
+            // Check checksum
+            let mut b1:u8 = 0;
+            for byte in &received[9..62]{
+                b1=b1.wrapping_add(byte.clone());
+            }
+
+            if  checksum1 != b1 {
+                println!("Invalid checksum!\n");
+            }else{
+                println!("Throttle position sensor: {}%",((throttle_position_sensor as u16 *100)/255));
+                println!("Battery voltage: {}.{}V", battery_voltage / 10, battery_voltage % 10);
+            }
         }else{
             print!("Invalid response!");
         }
 
+        //print!("Raw bytes: ({})",received.len());
         for byte in received {
             print!("{:02X} ", byte);
         }
