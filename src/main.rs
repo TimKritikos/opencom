@@ -46,6 +46,18 @@ struct Cli {
     /// Archive JSON file. This will create a json file with all the bytes of the commands sent and responses received with timestamps to parse later
     #[arg(short='a')]
     archive_json_file: Option<PathBuf>,
+
+    /// Report live communication statistics
+    #[clap(short='S')]
+    live_communication_stats: bool,
+
+    /// Print parsed data as Newline Newline Delimited JSON (NDJSON) to stdout
+    #[arg(short='p')]
+    print_parsed_data: bool,
+
+    /// Print debug and development information
+    #[arg(short='d')]
+    print_debug: bool,
 }
 
 fn set_latency_linux(device: &String, latency: u8) -> std::io::Result<()> {
@@ -90,7 +102,7 @@ fn send_command(port:&mut dyn SerialPort, command:&Vec<u8>, size:usize) -> std::
     Ok(Vec::from(received))
 }
 
-fn initialise_opcom(port:&mut dyn SerialPort) -> std::io::Result<()>{
+fn initialise_opcom(port:&mut dyn SerialPort, print_debug: bool) -> std::io::Result<()>{
     let init_commands = vec![
         vec![0x02, 0x00, 0x20, 0x07, 0x29],
         vec![0x06, 0x00, 0x02, 0x81, 0x11, 0xf1, 0x81, 0x04, 0x10],
@@ -98,17 +110,19 @@ fn initialise_opcom(port:&mut dyn SerialPort) -> std::io::Result<()>{
 
     for command in init_commands {
 
-        print!("Sending command [ ",);
-        let mut first = 1;
-        for byte in &command {
-            if first == 1 {
-                first = 0;
-            }else{
-                print!(", ");
+        if print_debug {
+            eprint!("Sending command [ ",);
+            let mut first = 1;
+            for byte in &command {
+                if first == 1 {
+                    first = 0;
+                }else{
+                    eprint!(", ");
+                }
+                eprint!("{:02X}",byte);
             }
-            print!("{:02X}",byte);
+            eprint!(" ]");
         }
-        print!(" ]");
 
         let received = match send_command(&mut *port, &command, 1024){
             Ok(a) => a,
@@ -117,14 +131,16 @@ fn initialise_opcom(port:&mut dyn SerialPort) -> std::io::Result<()>{
             }
         };
 
-        println!(" OK");
+        if print_debug {
+            eprintln!(" OK");
 
-        print!("Received {} bytes : ", received.len());
+            eprint!("Received {} bytes : ", received.len());
 
-        for byte in received {
-            print!("{:02X} ", byte);
+            for byte in received {
+                eprint!("{:02X} ", byte);
+            }
+            eprintln!("\n");
         }
-        println!("\n");
     }
     Ok(())
 }
@@ -133,7 +149,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let cli = Cli::parse();
 
-    print!("Opening port: {} @ {} baud", cli.serial_port, BAUD_RATE);
+    if cli.print_debug {
+        eprint!("Opening port: {} @ {} baud", cli.serial_port, BAUD_RATE);
+    }
 
     const BAUD_RATE: u32 = 500000;
 
@@ -155,9 +173,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     port.clear(ClearBuffer::Input)?;
 
-    println!(" OK");
+    if cli.print_debug {
+        eprintln!(" OK");
+    }
 
-    initialise_opcom(&mut *port)?;
+    initialise_opcom(&mut *port, cli.print_debug)?;
 
     let mut request_stat_window = VecDeque::new();
     let mut error_stat_window = VecDeque::new();
@@ -178,16 +198,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut list_comma=false;
     let terminate_flag = Arc::new(AtomicBool::new(false));
     flag::register(SIGINT, Arc::clone(&terminate_flag))?;
+
     loop{
         let get_engine_data_command = vec![0x07, 0x00, 0x01, 0x82, 0x11, 0xf1, 0x21, 0x01, 0xa6, 0x54];
 
         match send_command(&mut *port, &get_engine_data_command, 64){
             Ok(received) => {
+                //TODO: Don't calculate those if flags not enabled
                 let stat_timestamp = Instant::now();
                 let clock_timestamp = SystemTime::now();
 
                 if let Some(ref mut file) = archive_json_file {
-                    let data_timestamp=clock_timestamp.duration_since(UNIX_EPOCH)?;
+                    let data_timestamp = clock_timestamp.duration_since(UNIX_EPOCH)?;
                     write!(file,"{}{{\"timestamp\":{}.{},\"command\":[",if list_comma{","}else{""},data_timestamp.as_secs(),data_timestamp.subsec_nanos())?;
                     let mut comma=false;
                     for byte in &get_engine_data_command {
@@ -207,76 +229,91 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if list_comma==false {
                         list_comma=true;
                     }
-                    write!(file,"]}}\n")?;
+                    writeln!(file,"]}}")?;
                 }
 
-                if  received.len() == 64 {
-                    let battery_voltage =          received[22];
-                    let throttle_position_sensor = received[36];
+                // Check if we get valid data and act if we don't
+                let valid_data = if  received.len() == 64 {
+                    let zero =                     received[ 1];
                     let checksum1 =                received[62];
                     let _unkown_checksum2 =        received[63];
 
-                    // Check checksum
                     let mut b1:u8 = 0;
                     for byte in &received[9..62]{
                         b1=b1.wrapping_add(*byte);
                     }
 
-                    if  checksum1 != b1 {
-                        println!("Invalid checksum!\n");
+                    if  checksum1 != b1 || zero != 0 {
+                        eprintln!("Invalid checksum!\n");
                         thread::sleep(Duration::from_millis(400));
+                        false
                     }else{
-                        println!("Throttle position sensor: {}%",((throttle_position_sensor as u16 *100)/255));
-                        println!("Battery voltage: {}.{}V", battery_voltage / 10, battery_voltage % 10);
+                        consecutive_errors=0;
+                        true
                     }
-                    consecutive_errors=0;
                 }else{
-                    print!("Invalid response!");
-                    error_stat_window.push_back(stat_timestamp);
+                    eprintln!("Invalid response size!");
+                    if cli.live_communication_stats {
+                        error_stat_window.push_back(stat_timestamp);
+                    }
                     consecutive_errors=consecutive_errors+1;
-                }
+                    false
+                };
 
                 if consecutive_errors > 5 {
-                    initialise_opcom(&mut *port)?;
+                    initialise_opcom(&mut *port, cli.print_debug)?;
                     consecutive_errors = 0;
                 }
 
-                request_stat_window.push_back(stat_timestamp);
+                // Parse and print values
+                if valid_data && cli.print_parsed_data {
+                    let battery_voltage =          received[22];
+                    let throttle_position_sensor = received[36];
 
-                // Calculate Stats
-                while let Some(&front) = request_stat_window.front() {
-                    if stat_timestamp.duration_since(front) > request_stat_window_size {
-                        request_stat_window.pop_front();
-                    } else {
-                        break;
-                    }
-                }
-                while let Some(&front) = error_stat_window.front() {
-                    if stat_timestamp.duration_since(front) > error_stat_window_size {
-                        error_stat_window.pop_front();
-                    } else {
-                        break;
-                    }
+                    eprintln!("Throttle position sensor: {}%",((throttle_position_sensor as u16 *100)/255));
+                    eprintln!("Battery voltage: {}.{}V", battery_voltage / 10, battery_voltage % 10);
                 }
 
-                println!("Sample rate: {:.1}Hz", request_stat_window.len() as f64 / request_stat_window_size.as_secs_f64());
-                println!("Error rate: {:.2}Hz", error_stat_window.len() as f64 / error_stat_window_size.as_secs_f64());
+                if cli.live_communication_stats {
+                    request_stat_window.push_back(stat_timestamp);
 
-                //print!("Raw bytes: ({})",received.len());
-                //for byte in received {
-                //    print!("{:02X} ", byte);
-                //}
-                //println!("\n");
+                    // Calculate Stats
+                    while let Some(&front) = request_stat_window.front() {
+                        if stat_timestamp.duration_since(front) > request_stat_window_size {
+                            request_stat_window.pop_front();
+                        } else {
+                            break;
+                        }
+                    }
+                    while let Some(&front) = error_stat_window.front() {
+                        if stat_timestamp.duration_since(front) > error_stat_window_size {
+                            error_stat_window.pop_front();
+                        } else {
+                            break;
+                        }
+                    }
+
+                    eprintln!("Sample rate: {:.1}Hz", request_stat_window.len() as f64 / request_stat_window_size.as_secs_f64());
+                    eprintln!("Error rate: {:.2}Hz", error_stat_window.len() as f64 / error_stat_window_size.as_secs_f64());
+                }
+
+                if cli.print_debug {
+                    eprint!("Raw received bytes: ({})",received.len());
+                    for byte in received {
+                        eprint!("{:02X} ", byte);
+                    }
+                    eprintln!();
+                }
             },
             Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
             Err(e) => {
-                println!("Error: {:?}",e);
+                eprintln!("Error: {:?}",e);
             }
         }
 
         if terminate_flag.load(Ordering::Relaxed) {
             if let Some(ref mut file) = archive_json_file {
-                write!(file,"]}}\n")?;
+                writeln!(file,"]}}")?;
             }
             break;
         }
