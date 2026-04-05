@@ -49,13 +49,13 @@ fn set_latency_linux(device: &String, latency: u8) -> std::io::Result<()> {
     Ok(())
 }
 
-fn send_command(port:&mut dyn SerialPort, command:Vec<u8> ) -> std::io::Result<Vec<u8>>{
+fn send_command(port:&mut dyn SerialPort, command:Vec<u8>, size:usize) -> std::io::Result<Vec<u8>>{
     for byte in command {
         port.write_all(&[byte])?;
         port.flush()?;
     }
 
-    let mut rx_buf = vec![0u8; 1024];
+    let mut rx_buf = vec![0u8; size];
     let mut total_read = 0;
 
     loop {
@@ -87,7 +87,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     const BAUD_RATE: u32 = 500000;
 
     let mut port = serialport::new(&cli.serial_port, BAUD_RATE)
-        .timeout(Duration::from_millis(400))
+        .timeout(Duration::from_millis(150))
         .open()?;
 
     set_latency_linux(&cli.serial_port,2)?;
@@ -137,7 +137,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         print!(" ]");
 
-        let received = send_command(&mut *port, command).unwrap();
+        let received = send_command(&mut *port, command, 1024).unwrap();
 
         println!(" OK");
 
@@ -157,7 +157,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     loop{
         let get_engine_data_command = vec![0x07, 0x00, 0x01, 0x82, 0x11, 0xf1, 0x21, 0x01, 0xa6, 0x54];
 
-        let received = send_command(&mut *port, get_engine_data_command).unwrap();
+        let received = send_command(&mut *port, get_engine_data_command, 64).unwrap();
 
         let now = Instant::now();
 
@@ -175,6 +175,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             if  checksum1 != b1 {
                 println!("Invalid checksum!\n");
+                thread::sleep(Duration::from_millis(400));
             }else{
                 println!("Throttle position sensor: {}%",((throttle_position_sensor as u16 *100)/255));
                 println!("Battery voltage: {}.{}V", battery_voltage / 10, battery_voltage % 10);
