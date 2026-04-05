@@ -48,35 +48,32 @@ fn set_latency_linux(device: &String, latency: u8) -> std::io::Result<()> {
 }
 
 fn send_command(port:&mut dyn SerialPort, command:Vec<u8> ) -> std::io::Result<Vec<u8>>{
-        for byte in command {
-            port.write_all(&[byte])?;
-            port.flush()?;
-        }
+    for byte in command {
+        port.write_all(&[byte])?;
+        port.flush()?;
+    }
 
-        let mut rx_buf = vec![0u8; 1024];
-        let mut total_read = 0;
+    let mut rx_buf = vec![0u8; 1024];
+    let mut total_read = 0;
 
-        loop {
-            match port.read(&mut rx_buf[total_read..]) {
-                Ok(n) => {
-                    total_read += n;
-
-                    // Stop if buffer is full or we got "enough"
-                    if total_read >= rx_buf.len() {
-                        break;
-                    }
-                }
-                Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => {
-                    // No more data within timeout → assume done
+    loop {
+        match port.read(&mut rx_buf[total_read..]) {
+            Ok(n) => {
+                total_read += n;
+                if total_read >= rx_buf.len() {
                     break;
                 }
-                Err(e) => return Err(e.into()),
             }
+            Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => {
+                break;
+            }
+            Err(e) => return Err(e),
         }
+    }
 
-        let received = &rx_buf[..total_read];
+    let received = &rx_buf[..total_read];
 
-        Ok(Vec::from(received))
+    Ok(Vec::from(received))
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -107,7 +104,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!(" OK");
 
-    let commands = vec![
+    let init_commands = vec![
         vec![0x01, 0x00, 0xab, 0xac],
         vec![0x01, 0x00, 0xaa, 0xab],
         vec![0x02, 0x00, 0xac, 0x01, 0xaf],
@@ -124,7 +121,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         vec![0x07, 0x00, 0x01, 0x82, 0x11, 0xf1, 0x1a, 0x80, 0x1e, 0x44],
     ];
 
-    for command in commands {
+    for command in init_commands {
 
         print!("Sending command [ ",);
         let mut first = 1;
@@ -159,12 +156,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let battery_voltage =          received[22];
             let throttle_position_sensor = received[36];
             let checksum1 =                received[62];
-            let unkown_checksum2 =         received[63];
+            let _unkown_checksum2 =        received[63];
 
             // Check checksum
             let mut b1:u8 = 0;
             for byte in &received[9..62]{
-                b1=b1.wrapping_add(byte.clone());
+                b1=b1.wrapping_add(*byte);
             }
 
             if  checksum1 != b1 {
