@@ -172,7 +172,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     if let Some(ref mut file) = archive_json_file {
-        writeln!(file,"{{\"data_type\": \"opencom_log_file\",\"data_structure_version\":\"{}\",\"data\":[",env!("CARGO_PKG_VERSION"))?;
+        writeln!(file,"{{\"data_type\": \"opencom_archive_log_file\",\"data_structure_version\":\"{}\",\"data\":[",env!("CARGO_PKG_VERSION"))?;
     }
 
     let mut list_comma=false;
