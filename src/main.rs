@@ -17,7 +17,7 @@
    You should have received a copy of the GNU General Public License
    along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
 
-use clap::{Parser};
+use clap::{Parser,ValueEnum};
 use std::time::Duration;
 use std::path::{PathBuf};
 use std::fs::File;
@@ -35,6 +35,14 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
+use std::any::Any;
+
+//#[derive(Clone,ValueEnum,Debug)]
+#[derive(ValueEnum, Clone, PartialEq)]
+enum ScanModule {
+    Engine,
+    Chassis,
+}
 
 #[derive(Parser)]
 #[clap(author, version, about)]
@@ -58,7 +66,109 @@ struct Cli {
     /// Print debug and development information
     #[arg(short='d')]
     print_debug: bool,
+
+    /// Comma sepparated list of modules to scan
+    #[arg(short='m',value_enum,value_delimiter = ',', default_values_t = [ScanModule::Engine])]
+    modules: Vec<ScanModule>,
 }
+
+#[derive(Debug, Clone, Copy)]
+#[derive(PartialEq)]
+pub struct Command {
+    pub request: &'static [u8],
+    pub response_len: usize,
+}
+
+pub trait EcuSubsystem {
+    fn init_command(&self) -> Command;
+    fn request_command(&self) -> Command;
+    fn init(&self, port:&mut dyn SerialPort, print_debug:bool) -> std::io::Result<()>;
+    fn query(&self, port:&mut dyn SerialPort, print_debug:bool) -> std::io::Result<Vec<u8>>;
+    fn decode(&self, data: &[u8]) -> std::io::Result<Box<dyn Any>>;
+}
+
+pub struct Engine;
+
+pub struct EngineData {
+    pub throttle_position: f32,
+    pub battery_voltage: f32,
+}
+
+impl EcuSubsystem for Engine {
+
+    fn init_command(&self) -> Command {
+        Command {
+            request: &[0x06, 0x00, 0x02, 0x81, 0x11, 0xf1, 0x81, 0x04, 0x10],
+            response_len: 17,
+        }
+    }
+    fn request_command(&self) -> Command {
+        Command {
+            request: &[0x07, 0x00, 0x01, 0x82, 0x11, 0xf1, 0x21, 0x01, 0xa6, 0x54],
+            response_len: 64,
+        }
+    }
+
+    fn init(&self, port:&mut dyn SerialPort, print_debug:bool) -> std::io::Result<()> {
+        match send_command(&mut *port, Self::init_command(self), print_debug){
+            Ok(_) => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn query(&self, port:&mut dyn SerialPort, print_debug:bool) -> std::io::Result<Vec<u8>> {
+        send_command(&mut *port, Self::request_command(self), print_debug)
+    }
+
+    fn decode(&self, data: &[u8]) -> std::io::Result<Box<dyn Any>> {
+
+        let battery_voltage =          data[22];
+        let throttle_position_sensor = data[36];
+
+        Ok(Box::new(EngineData {
+            throttle_position: ((throttle_position_sensor as f32 *100.0)/255.0),
+            battery_voltage: battery_voltage as f32 / 10.0,
+        }))
+    }
+}
+
+pub struct Chassis;
+
+pub struct ChassisData {
+}
+
+impl EcuSubsystem for Chassis {
+
+    fn init_command(&self) -> Command {
+        Command {
+            request: &[0x06, 0x00, 0x02, 0x81, 0x28, 0xf1 ,0x81 ,0x1b ,0x3e],
+            response_len: 17,
+        }
+    }
+    fn request_command(&self) -> Command {
+        Command {
+            request: &[0x07, 0x00, 0x01, 0x82, 0x28, 0xf1, 0x21, 0x01, 0xbd, 0x82],
+            response_len: 38,
+        }
+    }
+
+    fn init(&self, port:&mut dyn SerialPort, print_debug:bool) -> std::io::Result<()> {
+        match send_command(&mut *port, Self::init_command(self), print_debug){
+            Ok(_) => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn query(&self, port:&mut dyn SerialPort, print_debug:bool) -> std::io::Result<Vec<u8>> {
+        send_command(&mut *port, Self::request_command(self), print_debug)
+    }
+
+    fn decode(&self, _data: &[u8]) -> std::io::Result<Box<dyn Any>> {
+        Ok(Box::new(ChassisData {
+        }))
+    }
+}
+
 
 fn set_latency_linux(device: &String, latency: u8) -> std::io::Result<()> {
     let location = PathBuf::from(device);
@@ -73,13 +183,27 @@ fn set_latency_linux(device: &String, latency: u8) -> std::io::Result<()> {
     Ok(())
 }
 
-fn send_command(port:&mut dyn SerialPort, command:&Vec<u8>, size:usize) -> std::io::Result<Vec<u8>>{
-    for byte in command {
+fn send_command(port:&mut dyn SerialPort, command:Command, print_debug: bool) -> std::io::Result<Vec<u8>>{
+    if print_debug {
+        eprint!("Sending command [ ",);
+        let mut first = 1;
+        for byte in command.request {
+            if first == 1 {
+                first = 0;
+            }else{
+                eprint!(", ");
+            }
+            eprint!("{:02X}",byte);
+        }
+        eprint!(" ]");
+    }
+
+    for byte in command.request {
         port.write_all(&[*byte])?;
         port.flush()?;
     }
 
-    let mut rx_buf = vec![0u8; size];
+    let mut rx_buf = vec![0u8; command.response_len];
     let mut total_read = 0;
 
     loop {
@@ -87,62 +211,37 @@ fn send_command(port:&mut dyn SerialPort, command:&Vec<u8>, size:usize) -> std::
             Ok(n) => {
                 total_read += n;
                 if total_read >= rx_buf.len() {
+                    if print_debug {
+                        eprintln!(" OK");
+
+                        eprint!("Received {} bytes : ", total_read);
+
+                        for byte in rx_buf.iter().take(total_read) {
+                            eprint!("{:02X} ", byte);
+                        }
+                        eprintln!("\n");
+                    }
                     break;
                 }
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => {
+                if print_debug {
+                    eprintln!(" Ignored due to SIGINT");
+                }
                 break;
             }
-            Err(e) => return Err(e),
+            Err(e) => {
+                if print_debug {
+                    eprintln!(" ERR");
+                }
+                return Err(e);
+            }
         }
     }
 
     let received = &rx_buf[..total_read];
 
     Ok(Vec::from(received))
-}
-
-fn initialise_opcom(port:&mut dyn SerialPort, print_debug: bool) -> std::io::Result<()>{
-    let init_commands = vec![
-        vec![0x02, 0x00, 0x20, 0x07, 0x29],
-        vec![0x06, 0x00, 0x02, 0x81, 0x11, 0xf1, 0x81, 0x04, 0x10],
-    ];
-
-    for command in init_commands {
-
-        if print_debug {
-            eprint!("Sending command [ ",);
-            let mut first = 1;
-            for byte in &command {
-                if first == 1 {
-                    first = 0;
-                }else{
-                    eprint!(", ");
-                }
-                eprint!("{:02X}",byte);
-            }
-            eprint!(" ]");
-        }
-
-        let received = match send_command(&mut *port, &command, 1024){
-            Ok(a) => a,
-            Err(e)  => {
-                return Err(e);
-            }
-        };
-
-        if print_debug {
-            eprintln!(" OK");
-
-            eprint!("Received {} bytes : ", received.len());
-
-            for byte in received {
-                eprint!("{:02X} ", byte);
-            }
-            eprintln!("\n");
-        }
-    }
-    Ok(())
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -156,7 +255,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     const BAUD_RATE: u32 = 500000;
 
     let mut port = serialport::new(&cli.serial_port, BAUD_RATE)
-        .timeout(Duration::from_millis(150))
+        .timeout(Duration::from_millis(1000))
         .open()?;
 
     set_latency_linux(&cli.serial_port,2)?;
@@ -177,7 +276,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!(" OK");
     }
 
-    initialise_opcom(&mut *port, cli.print_debug)?;
+    let _ = send_command(&mut *port, Command { request: &[0x02, 0x00, 0x20, 0x07, 0x29], response_len: 200, },cli.print_debug);
 
     let mut request_stat_window = VecDeque::new();
     let mut error_stat_window = VecDeque::new();
@@ -199,123 +298,140 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let terminate_flag = Arc::new(AtomicBool::new(false));
     flag::register(SIGINT, Arc::clone(&terminate_flag))?;
 
-    loop{
-        let get_engine_data_command = vec![0x07, 0x00, 0x01, 0x82, 0x11, 0xf1, 0x21, 0x01, 0xa6, 0x54];
+    let mut old_subsystem: &ScanModule = &ScanModule::Engine;
+    let mut first_init = false;
+    'main_loop: loop{
+        for subsystem in &cli.modules {
 
-        match send_command(&mut *port, &get_engine_data_command, 64){
-            Ok(received) => {
-                //TODO: Don't calculate those if flags not enabled
-                let stat_timestamp = Instant::now();
-                let clock_timestamp = SystemTime::now();
+            let subsystem_code: Box<dyn EcuSubsystem> = match subsystem{
+                ScanModule::Engine => Box::new(Engine),
+                ScanModule::Chassis => Box::new(Chassis),
+            };
 
+            if subsystem != old_subsystem || !first_init {
+                subsystem_code.init(&mut *port,cli.print_debug)?;
+            }
+            if !first_init{
+                first_init = true;
+            }
+
+            old_subsystem = subsystem;
+            match subsystem_code.query(&mut *port,cli.print_debug){
+                Ok(received) => {
+                    //TODO: Don't calculate those if flags not enabled
+                    let stat_timestamp = Instant::now();
+                    let clock_timestamp = SystemTime::now();
+
+                    if let Some(ref mut file) = archive_json_file {
+                        let data_timestamp = clock_timestamp.duration_since(UNIX_EPOCH)?;
+                        write!(file,"{}{{\"timestamp\":{}.{},\"command\":[",if list_comma{","}else{""},data_timestamp.as_secs(),data_timestamp.subsec_nanos())?;
+                        let mut comma=false;
+                        for byte in subsystem_code.request_command().request {
+                            write!(file, "{}{}",if comma{","}else{""}, byte)?;
+                            if !comma {
+                                comma=true;
+                            }
+                        }
+                        write!(file,"],\"response\":[",)?;
+                        comma=false;
+                        for byte in &received {
+                            write!(file, "{}{}",if comma{","}else{""}, byte)?;
+                            if !comma {
+                                comma=true;
+                            }
+                        }
+                        if !list_comma {
+                            list_comma=true;
+                        }
+                        writeln!(file,"]}}")?;
+                    }
+
+                    // Check if we get valid data and act if we don't
+                    let valid_data = if received.len() > 9 {
+                        let zero =                     received[ 1];
+                        let checksum1 =                received[received.len()-2];
+                        let _unkown_checksum2 =        received[received.len()-1];
+
+                        let mut b1:u8 = 0;
+                        for byte in &received[9..received.len()-2]{
+                            b1=b1.wrapping_add(*byte);
+                        }
+
+                        if  checksum1 != b1 || zero != 0 {
+                            eprintln!("Invalid checksum!\n");
+                            thread::sleep(Duration::from_millis(400));
+                            false
+                        }else{
+                            consecutive_errors=0;
+                            true
+                        }
+                    }else{
+                        eprintln!("Invalid response size!");
+                        if cli.live_communication_stats {
+                            error_stat_window.push_back(stat_timestamp);
+                        }
+                        consecutive_errors += 1;
+                        false
+                    };
+
+                    if consecutive_errors > 5 {
+                        subsystem_code.init(&mut *port,cli.print_debug)?;
+                        consecutive_errors = 0;
+                    }
+
+                    // Parse and print values
+                    if valid_data && cli.print_parsed_data {
+                        let parsed = subsystem_code.decode(&received)?;
+                        if let Ok(parsed) = parsed.downcast::<EngineData>() {
+                            eprintln!("Throttle position sensor: {}%",parsed.throttle_position );
+                            eprintln!("Battery voltage: {}V", parsed.battery_voltage );
+                        }
+                    }
+
+                    if cli.live_communication_stats {
+                        request_stat_window.push_back(stat_timestamp);
+
+                        // Calculate Stats
+                        while let Some(&front) = request_stat_window.front() {
+                            if stat_timestamp.duration_since(front) > request_stat_window_size {
+                                request_stat_window.pop_front();
+                            } else {
+                                break;
+                            }
+                        }
+                        while let Some(&front) = error_stat_window.front() {
+                            if stat_timestamp.duration_since(front) > error_stat_window_size {
+                                error_stat_window.pop_front();
+                            } else {
+                                break;
+                            }
+                        }
+
+                        eprintln!("Sample rate: {:.1}Hz", request_stat_window.len() as f64 / request_stat_window_size.as_secs_f64());
+                        eprintln!("Error rate: {:.2}Hz", error_stat_window.len() as f64 / error_stat_window_size.as_secs_f64());
+                    }
+
+                    if cli.print_debug {
+                        eprint!("Raw received bytes: ({})",received.len());
+                        for byte in received {
+                            eprint!("{:02X} ", byte);
+                        }
+                        eprintln!();
+                    }
+                },
+                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => {
+                    eprintln!("Error: {:?}",e);
+                }
+            }
+
+
+            if terminate_flag.load(Ordering::Relaxed) {
                 if let Some(ref mut file) = archive_json_file {
-                    let data_timestamp = clock_timestamp.duration_since(UNIX_EPOCH)?;
-                    write!(file,"{}{{\"timestamp\":{}.{},\"command\":[",if list_comma{","}else{""},data_timestamp.as_secs(),data_timestamp.subsec_nanos())?;
-                    let mut comma=false;
-                    for byte in &get_engine_data_command {
-                        write!(file, "{}{}",if comma{","}else{""}, byte)?;
-                        if !comma {
-                            comma=true;
-                        }
-                    }
-                    write!(file,"],\"response\":[",)?;
-                    comma=false;
-                    for byte in &received {
-                        write!(file, "{}{}",if comma{","}else{""}, byte)?;
-                        if !comma {
-                            comma=true;
-                        }
-                    }
-                    if !list_comma {
-                        list_comma=true;
-                    }
                     writeln!(file,"]}}")?;
                 }
-
-                // Check if we get valid data and act if we don't
-                let valid_data = if  received.len() == 64 {
-                    let zero =                     received[ 1];
-                    let checksum1 =                received[62];
-                    let _unkown_checksum2 =        received[63];
-
-                    let mut b1:u8 = 0;
-                    for byte in &received[9..62]{
-                        b1=b1.wrapping_add(*byte);
-                    }
-
-                    if  checksum1 != b1 || zero != 0 {
-                        eprintln!("Invalid checksum!\n");
-                        thread::sleep(Duration::from_millis(400));
-                        false
-                    }else{
-                        consecutive_errors=0;
-                        true
-                    }
-                }else{
-                    eprintln!("Invalid response size!");
-                    if cli.live_communication_stats {
-                        error_stat_window.push_back(stat_timestamp);
-                    }
-                    consecutive_errors += 1;
-                    false
-                };
-
-                if consecutive_errors > 5 {
-                    initialise_opcom(&mut *port, cli.print_debug)?;
-                    consecutive_errors = 0;
-                }
-
-                // Parse and print values
-                if valid_data && cli.print_parsed_data {
-                    let battery_voltage =          received[22];
-                    let throttle_position_sensor = received[36];
-
-                    eprintln!("Throttle position sensor: {}%",((throttle_position_sensor as u16 *100)/255));
-                    eprintln!("Battery voltage: {}.{}V", battery_voltage / 10, battery_voltage % 10);
-                }
-
-                if cli.live_communication_stats {
-                    request_stat_window.push_back(stat_timestamp);
-
-                    // Calculate Stats
-                    while let Some(&front) = request_stat_window.front() {
-                        if stat_timestamp.duration_since(front) > request_stat_window_size {
-                            request_stat_window.pop_front();
-                        } else {
-                            break;
-                        }
-                    }
-                    while let Some(&front) = error_stat_window.front() {
-                        if stat_timestamp.duration_since(front) > error_stat_window_size {
-                            error_stat_window.pop_front();
-                        } else {
-                            break;
-                        }
-                    }
-
-                    eprintln!("Sample rate: {:.1}Hz", request_stat_window.len() as f64 / request_stat_window_size.as_secs_f64());
-                    eprintln!("Error rate: {:.2}Hz", error_stat_window.len() as f64 / error_stat_window_size.as_secs_f64());
-                }
-
-                if cli.print_debug {
-                    eprint!("Raw received bytes: ({})",received.len());
-                    for byte in received {
-                        eprint!("{:02X} ", byte);
-                    }
-                    eprintln!();
-                }
-            },
-            Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(e) => {
-                eprintln!("Error: {:?}",e);
+                break 'main_loop;
             }
-        }
-
-        if terminate_flag.load(Ordering::Relaxed) {
-            if let Some(ref mut file) = archive_json_file {
-                writeln!(file,"]}}")?;
-            }
-            break;
         }
     }
     Ok(())
