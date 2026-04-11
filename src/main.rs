@@ -95,6 +95,7 @@ pub struct EngineData {
     pub battery_voltage: f32,
     pub air_fule_ratio: f32,
     pub idle_air_control_valve: f32,
+    pub injection_pulse_timing: f32,
 }
 
 impl EcuSubsystem for Engine {
@@ -128,6 +129,7 @@ impl EcuSubsystem for Engine {
         let battery_voltage =           data[22];
         let throttle_position_voltage = data[35];
         let throttle_position_sensor =  data[36];
+        let injection_pulse_timing =    data[39];
         let idle_air_control_valve =    data[40];
         let air_fule_ratio =            data[49];
 
@@ -137,6 +139,7 @@ impl EcuSubsystem for Engine {
             air_fule_ratio: air_fule_ratio as f32 / 10.0,
             idle_air_control_valve: ((idle_air_control_valve as f32 *100.0)/255.0),
             throttle_position_voltage: throttle_position_voltage as f32 * 0.0195, // TODO: The multiplier is an estimate
+            injection_pulse_timing: injection_pulse_timing as f32 * 0.086 // TODO The multiplier is an estimate
         }))
     }
 }
@@ -397,6 +400,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             eprintln!("Battery voltage: {}V", parsed.battery_voltage );
                             eprintln!("Air/Fuel Ratio: {}", parsed.air_fule_ratio );
                             eprintln!("Idle air control valve: {}%", parsed.idle_air_control_valve );
+                            eprintln!("Injection pulse: {}ms", parsed.injection_pulse_timing );
                         }
                     }
 
