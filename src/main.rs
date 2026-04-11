@@ -91,6 +91,7 @@ pub struct Engine;
 
 pub struct EngineData {
     pub throttle_position: f32,
+    pub throttle_position_voltage: f32,
     pub battery_voltage: f32,
     pub air_fule_ratio: f32,
     pub idle_air_control_valve: f32,
@@ -124,16 +125,18 @@ impl EcuSubsystem for Engine {
 
     fn decode(&self, data: &[u8]) -> std::io::Result<Box<dyn Any>> {
 
-        let battery_voltage =          data[22];
-        let throttle_position_sensor = data[36];
-        let idle_air_control_valve =   data[40];
-        let air_fule_ratio =           data[49];
+        let battery_voltage =           data[22];
+        let throttle_position_voltage = data[35];
+        let throttle_position_sensor =  data[36];
+        let idle_air_control_valve =    data[40];
+        let air_fule_ratio =            data[49];
 
         Ok(Box::new(EngineData {
             throttle_position: ((throttle_position_sensor as f32 *100.0)/255.0),
             battery_voltage: battery_voltage as f32 / 10.0,
             air_fule_ratio: air_fule_ratio as f32 / 10.0,
-            idle_air_control_valve: ((idle_air_control_valve as f32 *100.0)/255.0)
+            idle_air_control_valve: ((idle_air_control_valve as f32 *100.0)/255.0),
+            throttle_position_voltage: throttle_position_voltage as f32 * 0.0195, // TODO: The multiplier is an estimate
         }))
     }
 }
@@ -390,6 +393,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let parsed = subsystem_code.decode(&received)?;
                         if let Ok(parsed) = parsed.downcast::<EngineData>() {
                             eprintln!("Throttle position sensor: {}%",parsed.throttle_position );
+                            eprintln!("Throttle position sensor Voltage: {}V",parsed.throttle_position_voltage );
                             eprintln!("Battery voltage: {}V", parsed.battery_voltage );
                             eprintln!("Air/Fuel Ratio: {}", parsed.air_fule_ratio );
                             eprintln!("Idle air control valve: {}%", parsed.idle_air_control_valve );
