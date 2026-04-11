@@ -92,6 +92,7 @@ pub struct Engine;
 pub struct EngineData {
     pub throttle_position: f32,
     pub battery_voltage: f32,
+    pub air_fule_ratio: f32,
 }
 
 impl EcuSubsystem for Engine {
@@ -124,10 +125,12 @@ impl EcuSubsystem for Engine {
 
         let battery_voltage =          data[22];
         let throttle_position_sensor = data[36];
+        let air_fule_ratio =           data[49];
 
         Ok(Box::new(EngineData {
             throttle_position: ((throttle_position_sensor as f32 *100.0)/255.0),
             battery_voltage: battery_voltage as f32 / 10.0,
+            air_fule_ratio: air_fule_ratio as f32 / 10.0,
         }))
     }
 }
@@ -385,6 +388,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if let Ok(parsed) = parsed.downcast::<EngineData>() {
                             eprintln!("Throttle position sensor: {}%",parsed.throttle_position );
                             eprintln!("Battery voltage: {}V", parsed.battery_voltage );
+                            eprintln!("Air/Fuel Ratio: {}", parsed.air_fule_ratio );
                         }
                     }
 
