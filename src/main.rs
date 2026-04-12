@@ -17,7 +17,7 @@
    You should have received a copy of the GNU General Public License
    along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
 
-use clap::{Parser,ValueEnum};
+use clap::{Parser,ValueEnum,Args};
 use std::time::Duration;
 use std::path::{PathBuf};
 use std::fs::File;
@@ -36,6 +36,7 @@ use std::sync::{
     Arc,
 };
 use std::any::Any;
+use serde::Deserialize;
 
 //#[derive(Clone,ValueEnum,Debug)]
 #[derive(ValueEnum, Clone, PartialEq)]
@@ -43,18 +44,23 @@ enum ScanModule {
     Engine,
     Chassis,
 }
+use clap::Subcommand;
+
+#[derive(Subcommand)]
+pub enum Commands {
+    /// Acquisition of data from the ECU
+    Acquire(AcquireArgs),
+
+    /// Decode previously recorded raw data
+    Decode(ReplayDecodeArgs),
+
+    /// Replay recorded data at real-time speed
+    Replay(ReplayDecodeArgs),
+}
 
 #[derive(Parser)]
 #[clap(author, version, about)]
 struct Cli {
-    /// Serial Port name
-    #[arg(short='s', long)]
-    serial_port: String,
-
-    /// Archive JSON file. This will create a json file with all the bytes of the commands sent and responses received with timestamps to parse later
-    #[arg(short='a', long)]
-    archive_json_file: Option<PathBuf>,
-
     /// Report live communication statistics
     #[clap(short='S', long)]
     live_communication_stats: bool,
@@ -67,9 +73,30 @@ struct Cli {
     #[arg(short='d', long)]
     print_debug: bool,
 
+    #[command(subcommand)]
+    pub command: Commands,
+}
+
+#[derive(Args)]
+pub struct AcquireArgs {
+    /// Serial Port name
+    #[arg(short='s', long)]
+    serial_port: String,
+
+    /// Archive JSON file. This will create a json file with all the bytes of the commands sent and responses received with timestamps to parse later
+    #[arg(short='a', long)]
+    archive_json_file: Option<PathBuf>,
+
     /// Comma sepparated list of modules to scan
     #[arg(short='m',value_enum,value_delimiter = ',', default_values_t = [ScanModule::Engine], long)]
     modules: Vec<ScanModule>,
+}
+
+#[derive(Args)]
+pub struct ReplayDecodeArgs {
+    /// Input archive JSON file
+    #[arg(short='i', long)]
+    input_archive: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -259,200 +286,278 @@ fn send_command(port:&mut dyn SerialPort, command:Command, print_debug: bool) ->
     Ok(Vec::from(received))
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+#[derive(Deserialize)]
+struct ArchiveJsonDataPoint{
+    timestamp: f32,
+    command: Vec<u8>,
+    response: Vec<u8>,
+}
 
-    let cli = Cli::parse();
+#[derive(Deserialize)]
+struct ArchiveJson{
+    data_type: String,
+    data_structure_version: String,
+    data: Vec<ArchiveJsonDataPoint>,
+}
 
-    if cli.print_debug {
-        eprint!("Opening port: {} @ {} baud", cli.serial_port, BAUD_RATE);
-    }
-
-    const BAUD_RATE: u32 = 500000;
-
-    let mut port = serialport::new(&cli.serial_port, BAUD_RATE)
-        .timeout(Duration::from_millis(1000))
-        .open()?;
-
-    set_latency_linux(&cli.serial_port,2)?;
-
-    port.write_request_to_send(true)?;
-
-    port.write_data_terminal_ready(true)?;
-    thread::sleep(Duration::from_millis(100));
-
-    port.write_request_to_send(true)?;
-
-    port.write_data_terminal_ready(true)?;
-    thread::sleep(Duration::from_millis(200));
-
-    port.clear(ClearBuffer::Input)?;
-
-    if cli.print_debug {
-        eprintln!(" OK");
-    }
-
-    let _ = send_command(&mut *port, Command { request: &[0x02, 0x00, 0x20, 0x07, 0x29], response_len: 200, },cli.print_debug);
-
+fn main_loop(input_archive:Option<PathBuf>, replay_realtime:bool, output_archive:Option<PathBuf>, mut serial_port:Option<&mut dyn SerialPort>, modules: Vec<ScanModule>, print_debug:bool, print_parsed_data:bool, live_communication_stats:bool) -> std::io::Result<()>{
     let mut request_stat_window = VecDeque::new();
     let mut error_stat_window = VecDeque::new();
     let request_stat_window_size = Duration::from_secs(5);
     let error_stat_window_size = Duration::from_secs(20);
     let mut consecutive_errors = 0;
 
-    let mut archive_json_file:Option<File> = if let Some(archive_json_filename) = cli.archive_json_file {
-        Some(File::create(archive_json_filename)?)
+    let mut output_archive_json_file:Option<File> = if let Some(output_archive) = output_archive {
+        Some(File::create(output_archive)?)
     }else{
         None
     };
 
-    if let Some(ref mut file) = archive_json_file {
+    if let Some(ref mut file) = output_archive_json_file {
         writeln!(file,"{{\"data_type\": \"opencom_archive_log_file\",\"data_structure_version\":\"{}\",\"data\":[",env!("CARGO_PKG_VERSION"))?;
     }
 
-    let mut list_comma=false;
     let terminate_flag = Arc::new(AtomicBool::new(false));
     flag::register(SIGINT, Arc::clone(&terminate_flag))?;
 
+    let mut list_comma=false;
+
     let mut old_subsystem: &ScanModule = &ScanModule::Engine;
     let mut first_init = false;
+
+    let mut archive_json_iterator = if let Some(input_archive_file) = input_archive {
+        let data = std::fs::read_to_string(input_archive_file).unwrap();
+        let cfg: ArchiveJson = serde_json::from_str(&data)?;
+        if cfg.data_type != "opencom_archive_log_file".to_string() {
+            eprintln!("Input archive isn't the correct type");
+            return Ok(());//TODO: Fix error handling
+        }
+        if cfg.data_structure_version != "0.1.0".to_string() { // TODO: Fix this check
+            eprintln!("Input archive file isn't written by a compatible software version");
+            return Ok(());//TODO: Fix error handling
+        }
+        let iterator = IntoIterator::into_iter(cfg.data);
+        Some(iterator)
+    }else{
+        None
+    };
+
     'main_loop: loop{
-        for subsystem in &cli.modules {
+        for subsystem in &modules {
 
             let subsystem_code: Box<dyn EcuSubsystem> = match subsystem{
                 ScanModule::Engine => Box::new(Engine),
                 ScanModule::Chassis => Box::new(Chassis),
             };
 
-            if subsystem != old_subsystem || !first_init {
-                subsystem_code.init(&mut *port,cli.print_debug)?;
-            }
-            if !first_init{
-                first_init = true;
+            if let Some(ref mut port) = serial_port {
+                if subsystem != old_subsystem || !first_init {
+                    subsystem_code.init(*port, print_debug)?;
+                }
+                if !first_init{
+                    first_init = true;
+                }
             }
 
             old_subsystem = subsystem;
-            match subsystem_code.query(&mut *port,cli.print_debug){
-                Ok(received) => {
-                    //TODO: Don't calculate those if flags not enabled
-                    let stat_timestamp = Instant::now();
-                    let clock_timestamp = SystemTime::now();
+            let response = if let Some(ref mut port) = serial_port {
+                match subsystem_code.query( *port, print_debug){
+                    Ok(received) => {
+                        Some(received)
+                    },
+                    Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {
+                        None
+                    }
+                    Err(e) => {
+                        eprintln!("Error: {:?}",e);
+                        break 'main_loop;
+                    }
+                }
+            }else if let Some(ref mut iterator) = archive_json_iterator {
+                match iterator.next() {
+                    Some(i) => {
+                        if i.command !=  [0x07, 0x00, 0x01, 0x82, 0x11, 0xf1, 0x21, 0x01, 0xa6, 0x54]{
+                            eprintln!("Error: archive contains data from subsystem other than the engine one and it's not currently supported");
+                            break 'main_loop // TODO: do proper error handling
+                        }
+                        Some(i.response)
+                    }
+                    None => {
+                        break 'main_loop
+                    }
+                }
+            }else{
+                None
+            };
 
-                    if let Some(ref mut file) = archive_json_file {
-                        let data_timestamp = clock_timestamp.duration_since(UNIX_EPOCH)?;
-                        write!(file,"{}{{\"timestamp\":{}.{},\"command\":[",if list_comma{","}else{""},data_timestamp.as_secs(),data_timestamp.subsec_nanos())?;
-                        let mut comma=false;
-                        for byte in subsystem_code.request_command().request {
-                            write!(file, "{}{}",if comma{","}else{""}, byte)?;
-                            if !comma {
-                                comma=true;
-                            }
+            if let Some(received) = response {
+                //TODO: Don't calculate those if flags not enabled
+                let stat_timestamp = Instant::now();
+                let clock_timestamp = SystemTime::now();
+
+                if let Some(ref mut file) = output_archive_json_file {
+                    let data_timestamp = clock_timestamp.duration_since(UNIX_EPOCH).unwrap();
+                    write!(file,"{}{{\"timestamp\":{}.{},\"command\":[",if list_comma{","}else{""},data_timestamp.as_secs(),data_timestamp.subsec_nanos())?;
+                    let mut comma=false;
+                    for byte in subsystem_code.request_command().request {
+                        write!(file, "{}{}",if comma{","}else{""}, byte)?;
+                        if !comma {
+                            comma=true;
                         }
-                        write!(file,"],\"response\":[",)?;
-                        comma=false;
-                        for byte in &received {
-                            write!(file, "{}{}",if comma{","}else{""}, byte)?;
-                            if !comma {
-                                comma=true;
-                            }
+                    }
+                    write!(file,"],\"response\":[",)?;
+                    comma=false;
+                    for byte in &received {
+                        write!(file, "{}{}",if comma{","}else{""}, byte)?;
+                        if !comma {
+                            comma=true;
                         }
-                        if !list_comma {
-                            list_comma=true;
-                        }
-                        writeln!(file,"]}}")?;
+                    }
+                    if !list_comma {
+                        list_comma=true;
+                    }
+                    writeln!(file,"]}}")?;
+                }
+
+                // Check if we get valid data and act if we don't
+                let valid_data = if received.len() > 9 {
+                    let zero =                     received[ 1];
+                    let checksum1 =                received[received.len()-2];
+                    let _unkown_checksum2 =        received[received.len()-1];
+
+                    let mut b1:u8 = 0;
+                    for byte in &received[9..received.len()-2]{
+                        b1=b1.wrapping_add(*byte);
                     }
 
-                    // Check if we get valid data and act if we don't
-                    let valid_data = if received.len() > 9 {
-                        let zero =                     received[ 1];
-                        let checksum1 =                received[received.len()-2];
-                        let _unkown_checksum2 =        received[received.len()-1];
-
-                        let mut b1:u8 = 0;
-                        for byte in &received[9..received.len()-2]{
-                            b1=b1.wrapping_add(*byte);
-                        }
-
-                        if  checksum1 != b1 || zero != 0 {
-                            eprintln!("Invalid checksum!\n");
-                            thread::sleep(Duration::from_millis(400));
-                            false
-                        }else{
-                            consecutive_errors=0;
-                            true
-                        }
-                    }else{
-                        eprintln!("Invalid response size!");
-                        if cli.live_communication_stats {
-                            error_stat_window.push_back(stat_timestamp);
-                        }
-                        consecutive_errors += 1;
+                    if  checksum1 != b1 || zero != 0 {
+                        eprintln!("Invalid checksum!\n");
+                        thread::sleep(Duration::from_millis(400));
                         false
-                    };
-
-                    if consecutive_errors > 5 {
-                        subsystem_code.init(&mut *port,cli.print_debug)?;
-                        consecutive_errors = 0;
+                    }else{
+                        consecutive_errors=0;
+                        true
                     }
+                }else{
+                    eprintln!("Invalid response size!");
+                    if live_communication_stats {
+                        error_stat_window.push_back(stat_timestamp);
+                    }
+                    consecutive_errors += 1;
+                    false
+                };
 
-                    // Parse and print values
-                    if valid_data && cli.print_parsed_data {
-                        let parsed = subsystem_code.decode(&received)?;
-                        if let Ok(parsed) = parsed.downcast::<EngineData>() {
-                            eprintln!("Throttle position sensor: {}%",parsed.throttle_position );
-                            eprintln!("Throttle position sensor Voltage: {}V",parsed.throttle_position_voltage );
-                            eprintln!("Battery voltage: {}V", parsed.battery_voltage );
-                            eprintln!("Air/Fuel Ratio: {}", parsed.air_fule_ratio );
-                            eprintln!("Idle air control valve: {}%", parsed.idle_air_control_valve );
-                            eprintln!("Injection pulse: {}ms", parsed.injection_pulse_timing );
-                            eprintln!("O2 Block Learn Multiplier cell number: {}", parsed.o2_block_learn_multiplier_cell_number );
+                if let Some(ref mut port) = serial_port && consecutive_errors > 5 {
+                    subsystem_code.init(*port,print_debug)?;
+                    consecutive_errors = 0;
+                }
+
+                // Parse and print values
+                if valid_data && print_parsed_data {
+                    let parsed = subsystem_code.decode(&received)?;
+                    if let Ok(parsed) = parsed.downcast::<EngineData>() {
+                        eprintln!("Throttle position sensor: {}%",parsed.throttle_position );
+                        eprintln!("Throttle position sensor Voltage: {}V",parsed.throttle_position_voltage );
+                        eprintln!("Battery voltage: {}V", parsed.battery_voltage );
+                        eprintln!("Air/Fuel Ratio: {}", parsed.air_fule_ratio );
+                        eprintln!("Idle air control valve: {}%", parsed.idle_air_control_valve );
+                        eprintln!("Injection pulse: {}ms", parsed.injection_pulse_timing );
+                        eprintln!("O2 Block Learn Multiplier cell number: {}", parsed.o2_block_learn_multiplier_cell_number );
+                    }
+                }
+
+                if live_communication_stats {
+                    request_stat_window.push_back(stat_timestamp);
+
+                    // Calculate Stats
+                    while let Some(&front) = request_stat_window.front() {
+                        if stat_timestamp.duration_since(front) > request_stat_window_size {
+                            request_stat_window.pop_front();
+                        } else {
+                            break;
+                        }
+                    }
+                    while let Some(&front) = error_stat_window.front() {
+                        if stat_timestamp.duration_since(front) > error_stat_window_size {
+                            error_stat_window.pop_front();
+                        } else {
+                            break;
                         }
                     }
 
-                    if cli.live_communication_stats {
-                        request_stat_window.push_back(stat_timestamp);
+                    eprintln!("Sample rate: {:.1}Hz", request_stat_window.len() as f64 / request_stat_window_size.as_secs_f64());
+                    eprintln!("Error rate: {:.2}Hz", error_stat_window.len() as f64 / error_stat_window_size.as_secs_f64());
+                }
 
-                        // Calculate Stats
-                        while let Some(&front) = request_stat_window.front() {
-                            if stat_timestamp.duration_since(front) > request_stat_window_size {
-                                request_stat_window.pop_front();
-                            } else {
-                                break;
-                            }
-                        }
-                        while let Some(&front) = error_stat_window.front() {
-                            if stat_timestamp.duration_since(front) > error_stat_window_size {
-                                error_stat_window.pop_front();
-                            } else {
-                                break;
-                            }
-                        }
-
-                        eprintln!("Sample rate: {:.1}Hz", request_stat_window.len() as f64 / request_stat_window_size.as_secs_f64());
-                        eprintln!("Error rate: {:.2}Hz", error_stat_window.len() as f64 / error_stat_window_size.as_secs_f64());
+                if print_debug {
+                    eprint!("Raw received bytes: ({})",received.len());
+                    for byte in received {
+                        eprint!("{:02X} ", byte);
                     }
-
-                    if cli.print_debug {
-                        eprint!("Raw received bytes: ({})",received.len());
-                        for byte in received {
-                            eprint!("{:02X} ", byte);
-                        }
-                        eprintln!();
-                    }
-                },
-                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(e) => {
-                    eprintln!("Error: {:?}",e);
+                    eprintln!();
                 }
             }
 
 
             if terminate_flag.load(Ordering::Relaxed) {
-                if let Some(ref mut file) = archive_json_file {
+                if let Some(ref mut file) = output_archive_json_file {
                     writeln!(file,"]}}")?;
                 }
                 break 'main_loop;
             }
         }
     }
+    Ok(())
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+
+    let cli = Cli::parse();
+
+    match cli.command {
+        Commands::Acquire(args) => {
+            // Initialise communication with the OpCom/VauxCom adapter
+
+            if cli.print_debug {
+                eprint!("Opening port: {} @ {} baud", args.serial_port, BAUD_RATE);
+            }
+
+            const BAUD_RATE: u32 = 500000;
+
+            let mut port = serialport::new(&args.serial_port, BAUD_RATE)
+                .timeout(Duration::from_millis(1000))
+                .open()?;
+
+            set_latency_linux(&args.serial_port,2)?;
+
+            port.write_request_to_send(true)?;
+
+            port.write_data_terminal_ready(true)?;
+            thread::sleep(Duration::from_millis(100));
+
+            port.write_request_to_send(true)?;
+
+            port.write_data_terminal_ready(true)?;
+            thread::sleep(Duration::from_millis(200));
+
+            port.clear(ClearBuffer::Input)?;
+
+            if cli.print_debug {
+                eprintln!(" OK");
+            }
+
+            let _ = send_command(&mut *port, Command { request: &[0x02, 0x00, 0x20, 0x07, 0x29], response_len: 200, },cli.print_debug);
+
+            main_loop(None, false, args.archive_json_file, Some(&mut *port), args.modules, cli.print_debug, cli.print_parsed_data, cli.live_communication_stats)?;
+        },
+        Commands::Decode(args) => {
+            main_loop(Some(args.input_archive), false, None, None, Vec::from([ScanModule::Engine]), cli.print_debug, cli.print_parsed_data, cli.live_communication_stats)?;
+        }
+        Commands::Replay(args) => {
+            //main_loop(Some(args.input_archive), true, None, None, Vec::new(), cli.print_debug, cli.print_parsed_data, cli.live_communication_stats)?;
+            eprintln!("Not currently supoprted");
+        }
+    }
+
     Ok(())
 }
