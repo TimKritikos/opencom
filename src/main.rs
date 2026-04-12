@@ -48,27 +48,27 @@ enum ScanModule {
 #[clap(author, version, about)]
 struct Cli {
     /// Serial Port name
-    #[arg(short='s')]
+    #[arg(short='s', long)]
     serial_port: String,
 
     /// Archive JSON file. This will create a json file with all the bytes of the commands sent and responses received with timestamps to parse later
-    #[arg(short='a')]
+    #[arg(short='a', long)]
     archive_json_file: Option<PathBuf>,
 
     /// Report live communication statistics
-    #[clap(short='S')]
+    #[clap(short='S', long)]
     live_communication_stats: bool,
 
     /// Print parsed data as Newline Newline Delimited JSON (NDJSON) to stdout
-    #[arg(short='p')]
+    #[arg(short='p', long)]
     print_parsed_data: bool,
 
     /// Print debug and development information
-    #[arg(short='d')]
+    #[arg(short='d', long)]
     print_debug: bool,
 
     /// Comma sepparated list of modules to scan
-    #[arg(short='m',value_enum,value_delimiter = ',', default_values_t = [ScanModule::Engine])]
+    #[arg(short='m',value_enum,value_delimiter = ',', default_values_t = [ScanModule::Engine], long)]
     modules: Vec<ScanModule>,
 }
 
