@@ -154,26 +154,29 @@ impl EcuSubsystem for Engine {
     }
 
     fn decode(&self, data: &[u8]) -> std::io::Result<Box<dyn Any>> {
+        if data.len() == 64 {
+            let battery_voltage =                       data[22];
+            let throttle_position_voltage =             data[35];
+            let throttle_position_sensor =              data[36];
+            let injection_pulse_timing =                data[39];
+            let idle_air_control_valve =                data[40];
+            let o2_block_learn_multiplier_cell_number = data[45];
+            let air_fule_ratio =                        data[49];
+            let rotations_per_minute =                  data[38];
 
-        let battery_voltage =                       data[22];
-        let throttle_position_voltage =             data[35];
-        let throttle_position_sensor =              data[36];
-        let injection_pulse_timing =                data[39];
-        let idle_air_control_valve =                data[40];
-        let o2_block_learn_multiplier_cell_number = data[45];
-        let air_fule_ratio =                        data[49];
-        let rotations_per_minute =                  data[38];
-
-        Ok(Box::new(EngineData {
-            throttle_position: ((throttle_position_sensor as f32 *100.0)/255.0),
-            battery_voltage: battery_voltage as f32 / 10.0,
-            air_fule_ratio: air_fule_ratio as f32 / 10.0,
-            idle_air_control_valve: ((idle_air_control_valve as f32 *100.0)/255.0),
-            throttle_position_voltage: throttle_position_voltage as f32 * 0.0195, // TODO: The multiplier is an estimate
-            injection_pulse_timing: injection_pulse_timing as f32 * 0.086, // TODO The multiplier is an estimate
-            o2_block_learn_multiplier_cell_number: o2_block_learn_multiplier_cell_number,
-            rotations_per_minute: rotations_per_minute as u16 * 25,
-        }))
+            Ok(Box::new(EngineData {
+                throttle_position: ((throttle_position_sensor as f32 *100.0)/255.0),
+                battery_voltage: battery_voltage as f32 / 10.0,
+                air_fule_ratio: air_fule_ratio as f32 / 10.0,
+                idle_air_control_valve: ((idle_air_control_valve as f32 *100.0)/255.0),
+                throttle_position_voltage: throttle_position_voltage as f32 * 0.0195, // TODO: The multiplier is an estimate
+                injection_pulse_timing: injection_pulse_timing as f32 * 0.086, // TODO The multiplier is an estimate
+                o2_block_learn_multiplier_cell_number: o2_block_learn_multiplier_cell_number,
+                rotations_per_minute: rotations_per_minute as u16 * 25,
+            }))
+        }else{
+            Err(std::io::Error::other("invalid command size"))
+        }
     }
 }
 
@@ -457,16 +460,17 @@ fn main_loop(input_archive:Option<PathBuf>, replay_realtime:bool, output_archive
 
                 // Parse and print values
                 if valid_data && print_parsed_data {
-                    let parsed = subsystem_code.decode(&received)?;
-                    if let Ok(parsed) = parsed.downcast::<EngineData>() {
-                        eprintln!("Throttle position sensor: {}%",parsed.throttle_position );
-                        eprintln!("Throttle position sensor Voltage: {}V",parsed.throttle_position_voltage );
-                        eprintln!("Battery voltage: {}V", parsed.battery_voltage );
-                        eprintln!("Air/Fuel Ratio: {}", parsed.air_fule_ratio );
-                        eprintln!("Idle air control valve: {}%", parsed.idle_air_control_valve );
-                        eprintln!("Injection pulse: {}ms", parsed.injection_pulse_timing );
-                        eprintln!("O2 Block Learn Multiplier cell number: {}", parsed.o2_block_learn_multiplier_cell_number );
-                        eprintln!("RPM : {}", parsed.rotations_per_minute );
+                    if let Ok(parsed) = subsystem_code.decode(&received){
+                        if let Ok(parsed) = parsed.downcast::<EngineData>() {
+                            eprintln!("Throttle position sensor: {}%",parsed.throttle_position );
+                            eprintln!("Throttle position sensor Voltage: {}V",parsed.throttle_position_voltage );
+                            eprintln!("Battery voltage: {}V", parsed.battery_voltage );
+                            eprintln!("Air/Fuel Ratio: {}", parsed.air_fule_ratio );
+                            eprintln!("Idle air control valve: {}%", parsed.idle_air_control_valve );
+                            eprintln!("Injection pulse: {}ms", parsed.injection_pulse_timing );
+                            eprintln!("O2 Block Learn Multiplier cell number: {}", parsed.o2_block_learn_multiplier_cell_number );
+                            eprintln!("RPM : {}", parsed.rotations_per_minute );
+                        }
                     }
                 }
 
