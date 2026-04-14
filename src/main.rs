@@ -123,7 +123,8 @@ pub struct EngineData {
     pub air_fule_ratio: f32,
     pub idle_air_control_valve: f32,
     pub injection_pulse_timing: f32,
-    pub o2_block_learn_multiplier_cell_number: u8
+    pub o2_block_learn_multiplier_cell_number: u8,
+    pub rotations_per_minute: u16,
 }
 
 impl EcuSubsystem for Engine {
@@ -161,6 +162,7 @@ impl EcuSubsystem for Engine {
         let idle_air_control_valve =                data[40];
         let o2_block_learn_multiplier_cell_number = data[45];
         let air_fule_ratio =                        data[49];
+        let rotations_per_minute =                  data[38];
 
         Ok(Box::new(EngineData {
             throttle_position: ((throttle_position_sensor as f32 *100.0)/255.0),
@@ -170,6 +172,7 @@ impl EcuSubsystem for Engine {
             throttle_position_voltage: throttle_position_voltage as f32 * 0.0195, // TODO: The multiplier is an estimate
             injection_pulse_timing: injection_pulse_timing as f32 * 0.086, // TODO The multiplier is an estimate
             o2_block_learn_multiplier_cell_number: o2_block_learn_multiplier_cell_number,
+            rotations_per_minute: rotations_per_minute as u16 * 25,
         }))
     }
 }
@@ -463,6 +466,7 @@ fn main_loop(input_archive:Option<PathBuf>, replay_realtime:bool, output_archive
                         eprintln!("Idle air control valve: {}%", parsed.idle_air_control_valve );
                         eprintln!("Injection pulse: {}ms", parsed.injection_pulse_timing );
                         eprintln!("O2 Block Learn Multiplier cell number: {}", parsed.o2_block_learn_multiplier_cell_number );
+                        eprintln!("RPM : {}", parsed.rotations_per_minute );
                     }
                 }
 
