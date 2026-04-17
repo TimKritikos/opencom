@@ -134,7 +134,7 @@ fn set_latency_linux(device: &String, latency: u8) -> std::io::Result<()> {
 
 #[derive(Deserialize)]
 struct ArchiveJsonDataPoint{
-    timestamp: f32,
+    //timestamp: f32,
     command: Vec<u8>,
     response: Vec<u8>,
 }
@@ -146,7 +146,7 @@ struct ArchiveJson{
     data: Vec<ArchiveJsonDataPoint>,
 }
 
-fn main_loop(input_archive:Option<PathBuf>, replay_realtime:bool, output_archive:Option<PathBuf>, mut serial_port:Option<&mut dyn SerialPort>, modules: Vec<ScanModule>, print_debug:bool, print_parsed_data:bool, live_communication_stats:bool) -> std::io::Result<()>{
+fn main_loop(input_archive:Option<PathBuf>, _replay_realtime:bool, output_archive:Option<PathBuf>, mut serial_port:Option<&mut dyn SerialPort>, modules: Vec<ScanModule>, print_debug:bool, print_parsed_data:bool, live_communication_stats:bool) -> std::io::Result<()>{
     let mut request_stat_window = VecDeque::new();
     let mut error_stat_window = VecDeque::new();
     let request_stat_window_size = Duration::from_secs(5);
@@ -401,7 +401,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Decode(args) => {
             main_loop(Some(args.input_archive), false, None, None, Vec::from([ScanModule::Engine]), cli.print_debug, cli.print_parsed_data, cli.live_communication_stats)?;
         }
-        Commands::Replay(args) => {
+        Commands::Replay(_args) => {
             //main_loop(Some(args.input_archive), true, None, None, Vec::new(), cli.print_debug, cli.print_parsed_data, cli.live_communication_stats)?;
             eprintln!("Not currently supoprted");
         }
