@@ -302,14 +302,7 @@ fn main_loop(input_archive:Option<PathBuf>, _replay_realtime:bool, output_archiv
                 if valid_data && print_parsed_data {
                     if let Ok(parsed) = subsystem_code.decode(&received){
                         if let Ok(parsed) = parsed.downcast::<engine_submodule::EngineData>() {
-                            eprintln!("Throttle position sensor: {}%",parsed.throttle_position );
-                            eprintln!("Throttle position sensor Voltage: {}V",parsed.throttle_position_voltage );
-                            eprintln!("Battery voltage: {}V", parsed.battery_voltage );
-                            eprintln!("Air/Fuel Ratio: {}", parsed.air_fule_ratio );
-                            eprintln!("Idle air control valve: {}%", parsed.idle_air_control_valve );
-                            eprintln!("Injection pulse: {}ms", parsed.injection_pulse_timing );
-                            eprintln!("O2 Block Learn Multiplier cell number: {}", parsed.o2_block_learn_multiplier_cell_number );
-                            eprintln!("RPM : {}", parsed.rotations_per_minute );
+                            println!("{}", serde_json::to_string(&parsed)?);
                         }
                     }
                 }
