@@ -19,6 +19,7 @@ pub struct EngineData {
     pub injection_pulse_timing_milliseconds: f32,
     pub o2_block_learn_multiplier_cell_number: u8,
     pub rotations_per_minute: u16,
+    pub coolant_temperature_c: f32,
 }
 
 impl EcuSubsystem for Engine {
@@ -50,6 +51,7 @@ impl EcuSubsystem for Engine {
     fn decode(&self, data: &[u8]) -> std::io::Result<Box<dyn Any>> {
         if data.len() == 64 {
             let battery_voltage =                       data[22];
+            let coolant_temperature_c =                  data[26];
             let throttle_position_voltage =             data[35];
             let throttle_position_percentage =          data[36];
             let injection_pulse_timing_milliseconds =   data[39];
@@ -67,6 +69,8 @@ impl EcuSubsystem for Engine {
                 injection_pulse_timing_milliseconds: injection_pulse_timing_milliseconds as f32 * 0.086, // TODO The multiplier is an estimate
                 o2_block_learn_multiplier_cell_number: o2_block_learn_multiplier_cell_number,
                 rotations_per_minute: rotations_per_minute as u16 * 25,
+                coolant_temperature_c: coolant_temperature_c as f32 * (3.0/4.0) - 40.0 ,
+
             }))
         }else{
             Err(std::io::Error::other("invalid command size"))
