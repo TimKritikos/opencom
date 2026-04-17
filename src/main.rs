@@ -38,6 +38,10 @@ use std::sync::{
 use std::any::Any;
 use serde::Deserialize;
 
+mod engine_submodule;
+mod chassis_submodule;
+mod opcom_communication;
+
 //#[derive(Clone,ValueEnum,Debug)]
 #[derive(ValueEnum, Clone, PartialEq)]
 enum ScanModule {
@@ -114,110 +118,6 @@ pub trait EcuSubsystem {
     fn decode(&self, data: &[u8]) -> std::io::Result<Box<dyn Any>>;
 }
 
-pub struct Engine;
-
-pub struct EngineData {
-    pub throttle_position: f32,
-    pub throttle_position_voltage: f32,
-    pub battery_voltage: f32,
-    pub air_fule_ratio: f32,
-    pub idle_air_control_valve: f32,
-    pub injection_pulse_timing: f32,
-    pub o2_block_learn_multiplier_cell_number: u8,
-    pub rotations_per_minute: u16,
-}
-
-impl EcuSubsystem for Engine {
-
-    fn init_command(&self) -> Command {
-        Command {
-            request: &[0x06, 0x00, 0x02, 0x81, 0x11, 0xf1, 0x81, 0x04, 0x10],
-            response_len: 17,
-        }
-    }
-    fn request_command(&self) -> Command {
-        Command {
-            request: &[0x07, 0x00, 0x01, 0x82, 0x11, 0xf1, 0x21, 0x01, 0xa6, 0x54],
-            response_len: 64,
-        }
-    }
-
-    fn init(&self, port:&mut dyn SerialPort, print_debug:bool) -> std::io::Result<()> {
-        match send_command(&mut *port, Self::init_command(self), print_debug){
-            Ok(_) => Ok(()),
-            Err(e) => Err(e),
-        }
-    }
-
-    fn query(&self, port:&mut dyn SerialPort, print_debug:bool) -> std::io::Result<Vec<u8>> {
-        send_command(&mut *port, Self::request_command(self), print_debug)
-    }
-
-    fn decode(&self, data: &[u8]) -> std::io::Result<Box<dyn Any>> {
-        if data.len() == 64 {
-            let battery_voltage =                       data[22];
-            let throttle_position_voltage =             data[35];
-            let throttle_position_sensor =              data[36];
-            let injection_pulse_timing =                data[39];
-            let idle_air_control_valve =                data[40];
-            let o2_block_learn_multiplier_cell_number = data[45];
-            let air_fule_ratio =                        data[49];
-            let rotations_per_minute =                  data[38];
-
-            Ok(Box::new(EngineData {
-                throttle_position: ((throttle_position_sensor as f32 *100.0)/255.0),
-                battery_voltage: battery_voltage as f32 / 10.0,
-                air_fule_ratio: air_fule_ratio as f32 / 10.0,
-                idle_air_control_valve: ((idle_air_control_valve as f32 *100.0)/255.0),
-                throttle_position_voltage: throttle_position_voltage as f32 * 0.0195, // TODO: The multiplier is an estimate
-                injection_pulse_timing: injection_pulse_timing as f32 * 0.086, // TODO The multiplier is an estimate
-                o2_block_learn_multiplier_cell_number: o2_block_learn_multiplier_cell_number,
-                rotations_per_minute: rotations_per_minute as u16 * 25,
-            }))
-        }else{
-            Err(std::io::Error::other("invalid command size"))
-        }
-    }
-}
-
-pub struct Chassis;
-
-pub struct ChassisData {
-}
-
-impl EcuSubsystem for Chassis {
-
-    fn init_command(&self) -> Command {
-        Command {
-            request: &[0x06, 0x00, 0x02, 0x81, 0x28, 0xf1 ,0x81 ,0x1b ,0x3e],
-            response_len: 17,
-        }
-    }
-    fn request_command(&self) -> Command {
-        Command {
-            request: &[0x07, 0x00, 0x01, 0x82, 0x28, 0xf1, 0x21, 0x01, 0xbd, 0x82],
-            response_len: 38,
-        }
-    }
-
-    fn init(&self, port:&mut dyn SerialPort, print_debug:bool) -> std::io::Result<()> {
-        match send_command(&mut *port, Self::init_command(self), print_debug){
-            Ok(_) => Ok(()),
-            Err(e) => Err(e),
-        }
-    }
-
-    fn query(&self, port:&mut dyn SerialPort, print_debug:bool) -> std::io::Result<Vec<u8>> {
-        send_command(&mut *port, Self::request_command(self), print_debug)
-    }
-
-    fn decode(&self, _data: &[u8]) -> std::io::Result<Box<dyn Any>> {
-        Ok(Box::new(ChassisData {
-        }))
-    }
-}
-
-
 fn set_latency_linux(device: &String, latency: u8) -> std::io::Result<()> {
     let location = PathBuf::from(device);
     let path = format!(
@@ -231,66 +131,6 @@ fn set_latency_linux(device: &String, latency: u8) -> std::io::Result<()> {
     Ok(())
 }
 
-fn send_command(port:&mut dyn SerialPort, command:Command, print_debug: bool) -> std::io::Result<Vec<u8>>{
-    if print_debug {
-        eprint!("Sending command [ ",);
-        let mut first = 1;
-        for byte in command.request {
-            if first == 1 {
-                first = 0;
-            }else{
-                eprint!(", ");
-            }
-            eprint!("{:02X}",byte);
-        }
-        eprint!(" ]");
-    }
-
-    for byte in command.request {
-        port.write_all(&[*byte])?;
-        port.flush()?;
-    }
-
-    let mut rx_buf = vec![0u8; command.response_len];
-    let mut total_read = 0;
-
-    loop {
-        match port.read(&mut rx_buf[total_read..]) {
-            Ok(n) => {
-                total_read += n;
-                if total_read >= rx_buf.len() {
-                    if print_debug {
-                        eprintln!(" OK");
-
-                        eprint!("Received {} bytes : ", total_read);
-
-                        for byte in rx_buf.iter().take(total_read) {
-                            eprint!("{:02X} ", byte);
-                        }
-                        eprintln!("\n");
-                    }
-                    break;
-                }
-            }
-            Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => {
-                if print_debug {
-                    eprintln!(" Ignored due to SIGINT");
-                }
-                break;
-            }
-            Err(e) => {
-                if print_debug {
-                    eprintln!(" ERR");
-                }
-                return Err(e);
-            }
-        }
-    }
-
-    let received = &rx_buf[..total_read];
-
-    Ok(Vec::from(received))
-}
 
 #[derive(Deserialize)]
 struct ArchiveJsonDataPoint{
@@ -352,8 +192,8 @@ fn main_loop(input_archive:Option<PathBuf>, replay_realtime:bool, output_archive
         for subsystem in &modules {
 
             let subsystem_code: Box<dyn EcuSubsystem> = match subsystem{
-                ScanModule::Engine => Box::new(Engine),
-                ScanModule::Chassis => Box::new(Chassis),
+                ScanModule::Engine => Box::new(engine_submodule::Engine),
+                ScanModule::Chassis => Box::new(chassis_submodule::Chassis),
             };
 
             if let Some(ref mut port) = serial_port {
@@ -461,7 +301,7 @@ fn main_loop(input_archive:Option<PathBuf>, replay_realtime:bool, output_archive
                 // Parse and print values
                 if valid_data && print_parsed_data {
                     if let Ok(parsed) = subsystem_code.decode(&received){
-                        if let Ok(parsed) = parsed.downcast::<EngineData>() {
+                        if let Ok(parsed) = parsed.downcast::<engine_submodule::EngineData>() {
                             eprintln!("Throttle position sensor: {}%",parsed.throttle_position );
                             eprintln!("Throttle position sensor Voltage: {}V",parsed.throttle_position_voltage );
                             eprintln!("Battery voltage: {}V", parsed.battery_voltage );
@@ -554,7 +394,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!(" OK");
             }
 
-            let _ = send_command(&mut *port, Command { request: &[0x02, 0x00, 0x20, 0x07, 0x29], response_len: 200, },cli.print_debug);
+            let _ = opcom_communication::send_command(&mut *port, Command { request: &[0x02, 0x00, 0x20, 0x07, 0x29], response_len: 200, },cli.print_debug);
 
             main_loop(None, false, args.archive_json_file, Some(&mut *port), args.modules, cli.print_debug, cli.print_parsed_data, cli.live_communication_stats)?;
         },
